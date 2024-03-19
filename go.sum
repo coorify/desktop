@@ -1,0 +1,4 @@
+github.com/coorify/go-value v1.0.4 h1:Kt+FIVrxviUWLCtUmGuU77Ul+rI9Si3HDvVs5Zju6Ko=
+github.com/coorify/go-value v1.0.4/go.mod h1:RqgoNZyK+iRGb4gfMjqdfeZC+z6TdQ5uaepj2UUa1jw=
+golang.org/x/net v0.22.0 h1:9sGLhx7iRIHEiX0oAJ3MRZMUCElJgy7Br1nO+AMN3Tc=
+golang.org/x/net v0.22.0/go.mod h1:JKghWKKOSdJwpW2GEx0Ja7fmaKnMsbu+MWVZTokSYmg=
