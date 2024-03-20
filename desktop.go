@@ -109,15 +109,15 @@ func Run(be Backend) error {
 	uri := fmt.Sprintf("http://%s:%d", host, port)
 
 	crm := NewChrome()
-	if err := crm.Init(dir, bnr, uri); err != nil {
+	if err := crm.Open(dir, bnr, uri); err != nil {
 		return err
 	}
 
-	if err := crm.Load(uri); err != nil {
-		return err
-	}
+	// if err := crm.Load(uri); err != nil {
+	// 	return err
+	// }
 
-	crm.WaitDone()
+	crm.WaitClose()
 
 	if err := be.Stop(false); err != nil {
 		return err

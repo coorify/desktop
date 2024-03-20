@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"strings"
 	"sync"
 
 	"golang.org/x/net/websocket"
@@ -47,25 +48,17 @@ type H map[string]interface{}
 type Chrome struct {
 	sync.Mutex
 
+	home    string
 	id      int
 	ws      *websocket.Conn
 	cmd     *exec.Cmd
-	pending map[interface{}]chan json.RawMessage
-
-	Target  string
-	Session string
+	targets map[string]struct{}
 }
 
 type Request struct {
 	ID     int         `json:"id"`
 	Method string      `json:"method"`
 	Params interface{} `json:"params,omitempty"`
-}
-
-type Reply struct {
-	ID      int
-	Method  string
-	Payload interface{}
 }
 
 type TargetCreated struct {
@@ -80,7 +73,12 @@ type TargetDestroyed struct {
 }
 
 type AttachToTarget struct {
-	ID string `json:"sessionId"`
+	ID         string `json:"sessionId"`
+	TargetInfo struct {
+		Type string `json:"type"`
+		ID   string `json:"targetId"`
+		Url  string `json:"url"`
+	} `json:"targetInfo"`
 }
 
 type ReplyMessage struct {
@@ -91,11 +89,12 @@ type ReplyMessage struct {
 	Params json.RawMessage `json:"params"`
 }
 
-func (c *Chrome) Init(dir, path, uri string) error {
+func (c *Chrome) Open(dir, path, uri string) error {
 	var err error
 	args := append(DefaultChromeArgs, fmt.Sprintf("--user-data-dir=%s", dir))
 	args = append(args, fmt.Sprintf("--app=%s", uri))
 
+	c.home = uri
 	c.cmd = exec.Command(path, args...)
 
 	reader, err := c.cmd.StderrPipe()
@@ -114,42 +113,15 @@ func (c *Chrome) Init(dir, path, uri string) error {
 
 	go c.loop()
 
-	created := &TargetCreated{}
-	if err := c.Request("Target.setDiscoverTargets", H{"discover": true}, "Target.targetCreated", created); err != nil {
+	req := c.NewRequest("Target.setDiscoverTargets", H{"discover": true})
+	if err := websocket.JSON.Send(c.ws, req); err != nil {
 		return err
 	}
-	c.Target = created.TargetInfo.ID
-
-	session := &AttachToTarget{}
-	if err := c.Request("Target.attachToTarget", H{"targetId": c.Target}, "Target.attachToTarget", session); err != nil {
-		return err
-	}
-	c.Session = session.ID
-
-	// for method, args := range map[string]H{
-	// 	"Page.enable":          nil,
-	// 	"Target.setAutoAttach": {"autoAttach": true, "waitForDebuggerOnStart": false},
-	// 	"Network.enable":       nil,
-	// 	"Runtime.enable":       nil,
-	// 	"Security.enable":      nil,
-	// 	"Performance.enable":   nil,
-	// 	"Log.enable":           nil,
-	// } {
-	// 	if err := c.Request(method, args, "", nil); err != nil {
-	// 		c.Kill()
-	// 		c.cmd.Wait()
-	// 		return err
-	// 	}
-	// }
 
 	return nil
 }
 
-func (c *Chrome) Load(uri string) error {
-	return c.Request("Page.navigate", H{"url": uri}, "", nil)
-}
-
-func (c *Chrome) WaitDone() {
+func (c *Chrome) WaitClose() {
 	done := make(chan struct{})
 
 	go func() {
@@ -185,94 +157,79 @@ func (c *Chrome) NewRequest(method string, params interface{}) *Request {
 	}
 }
 
-func (c *Chrome) NewReply(method string, reply interface{}) *Reply {
-	return &Reply{
-		Method:  method,
-		Payload: reply,
-	}
-}
-
-func (c *Chrome) Request(reqMethod string, params interface{}, repMethod string, reply interface{}) error {
-	req := c.NewRequest(reqMethod, params)
-	rep := c.NewReply(repMethod, reply)
-	resc := make(chan json.RawMessage)
-
-	c.Lock()
-	if reqMethod == repMethod {
-		rep.ID = req.ID
-		c.pending[rep.ID] = resc
-	} else {
-		req.ID = 0
-		if rep.Method != "" {
-			c.pending[rep.Method] = resc
-		}
-	}
-	c.Unlock()
-
-	fmt.Printf("%#v\n", req)
-	if err := websocket.JSON.Send(c.ws, req); err != nil {
-		return err
-	}
-
-	if rep.Method != "" && rep.Payload != nil {
-		raw := <-resc
-		close(resc)
-		if err := json.Unmarshal(raw, rep.Payload); err != nil {
-			return err
-		}
-	}
-
-	return nil
+func (c *Chrome) NewRequestAsString(method string, params interface{}) string {
+	req := c.NewRequest(method, params)
+	bytes, _ := json.Marshal(req)
+	return string(bytes)
 }
 
 func (c *Chrome) loop() {
 	for {
 		rm := ReplyMessage{}
 		if err := websocket.JSON.Receive(c.ws, &rm); err != nil {
-			return
+			continue
 		}
-
-		c.Lock()
-		resc, ok := c.pending[rm.Method]
-		if ok {
-			delete(c.pending, rm.Method)
-			if rm.Params != nil {
-				resc <- rm.Params
-			} else if rm.Result != nil {
-				resc <- rm.Result
-			}
-		}
-		resc, ok = c.pending[rm.ID]
-		if ok {
-			delete(c.pending, rm.ID)
-			if rm.Params != nil {
-				resc <- rm.Params
-			} else if rm.Result != nil {
-				resc <- rm.Result
-			}
-		}
-
-		c.Unlock()
 
 		raws, _ := json.Marshal(rm)
-		fmt.Printf("%s\n", string(raws))
+		fmt.Printf("%s\n\n\n", string(raws))
 
-		if rm.Method == "Target.targetDestroyed" {
-			params := &TargetDestroyed{}
-			json.Unmarshal(rm.Params, &params)
-			if params.TargetID == c.Target {
+		switch rm.Method {
+		case "Target.targetCreated":
+			reply := &TargetCreated{}
+			if err := json.Unmarshal(rm.Params, reply); err != nil {
+				continue
+			}
+
+			if reply.TargetInfo.Type == "page" {
+				c.targets[reply.TargetInfo.ID] = struct{}{}
+				websocket.JSON.Send(c.ws, c.NewRequest("Target.attachToTarget", H{"targetId": reply.TargetInfo.ID}))
+			}
+
+		case "Target.targetDestroyed":
+			reply := &TargetDestroyed{}
+			if err := json.Unmarshal(rm.Params, reply); err != nil {
+				continue
+			}
+
+			delete(c.targets, reply.TargetID)
+			if len(c.targets) == 0 {
 				c.Kill()
 				return
 			}
-		}
 
+		case "Target.attachedToTarget":
+			reply := &AttachToTarget{}
+			if err := json.Unmarshal(rm.Params, reply); err != nil {
+				continue
+			}
+
+			if strings.HasPrefix(reply.TargetInfo.Url, "chrome://") {
+				req := c.NewRequestAsString("Page.navigate", H{"url": c.home})
+				websocket.JSON.Send(c.ws, c.NewRequest("Target.sendMessageToTarget", H{"message": req, "sessionId": reply.ID}))
+			}
+
+			reqs := []string{
+				// c.NewRequestAsString("Page.enable", nil),
+				// c.NewRequestAsString("Target.setAutoAttach", H{"autoAttach": true, "waitForDebuggerOnStart": false}),
+				// c.NewRequestAsString("Network.enable", nil),
+				// c.NewRequestAsString("Runtime.enable", nil),
+				// c.NewRequestAsString("Security.enable", nil),
+				// c.NewRequestAsString("Performance.enable", nil),
+				// c.NewRequestAsString("Log.enable", nil),
+			}
+
+			for _, req := range reqs {
+				websocket.JSON.Send(c.ws, c.NewRequest("Target.sendMessageToTarget", H{"message": req, "sessionId": reply.ID}))
+			}
+
+		}
 	}
 }
 
 func NewChrome() *Chrome {
 	return &Chrome{
 		id:      1,
-		pending: make(map[interface{}]chan json.RawMessage),
+		targets: make(map[string]struct{}),
 	}
 }
 
