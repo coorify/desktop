@@ -113,10 +113,6 @@ func Run(be Backend) error {
 		return err
 	}
 
-	// if err := crm.Load(uri); err != nil {
-	// 	return err
-	// }
-
 	crm.WaitClose()
 
 	if err := be.Stop(false); err != nil {

@@ -91,8 +91,15 @@ type ReplyMessage struct {
 
 func (c *Chrome) Open(dir, path, uri string) error {
 	var err error
-	args := append(DefaultChromeArgs, fmt.Sprintf("--user-data-dir=%s", dir))
+	args := make([]string, 0)
+	args = append(args, DefaultChromeArgs...)
+	args = append(args, fmt.Sprintf("--user-data-dir=%s", dir))
 	args = append(args, fmt.Sprintf("--app=%s", uri))
+	args = append(args, "--force-app-mode")
+	args = append(args, "--kiosk")
+	// args = append(args, "--app-auto-launched")
+	// args = append(args, "--hide-scrollbars")
+	// args = append(args, "--no-startup-window")
 
 	c.home = uri
 	c.cmd = exec.Command(path, args...)
